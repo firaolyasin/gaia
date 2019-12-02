@@ -197,7 +197,7 @@ export function testServer() {
     })
   })
 
-  test.only('handle request', async (t) => {
+  test('handle request', async (t) => {
     await usingMemoryDriver(async (mockDriver) => {
       const server = new HubServer(mockDriver, new MockProofs(),
                                   { whitelist: [testAddrs[0]], serverName: TEST_SERVER_NAME,
