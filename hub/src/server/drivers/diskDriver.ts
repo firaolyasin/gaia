@@ -2,6 +2,7 @@ import * as fs from 'fs-extra'
 import { readdir } from 'fs'
 import { BadPathError, InvalidInputError, DoesNotExist } from '../errors'
 import * as Path from 'path'
+import * as crypto from 'crypto'
 import { 
   ListFilesResult, PerformWriteArgs, WriteResult, PerformDeleteArgs, PerformRenameArgs,
   PerformStatArgs, StatResult, PerformReadArgs, ReadResult, PerformListFilesArgs,
@@ -213,10 +214,10 @@ class DiskDriver implements DriverModel {
 
     // remember content type in $storageRootDir/.gaia-metadata/$address/$path
     // (i.e. these files are outside the address bucket, and are thus hidden)
-    const contentTypePath = Path.join(
+    const metaDataFilePath = Path.join(
       this.storageRootDirectory, METADATA_DIRNAME, args.storageTopLevel, args.path)
 
-    return { absoluteFilePath: abspath, contentTypeFilePath: contentTypePath }
+    return { absoluteFilePath: abspath, metaDataFilePath }
   }
 
   async performWrite(args: PerformWriteArgs): Promise<WriteResult> {
@@ -228,7 +229,7 @@ class DiskDriver implements DriverModel {
       throw new InvalidInputError('Invalid content-type')
     }
 
-    const { absoluteFilePath, contentTypeFilePath } = this.getFullFilePathInfo(args)
+    const { absoluteFilePath, metaDataFilePath } = this.getFullFilePathInfo(args)
 
     const absdirname = Path.dirname(absoluteFilePath)
     await this.mkdirs(absdirname)
@@ -236,28 +237,26 @@ class DiskDriver implements DriverModel {
     const writePipe = fs.createWriteStream(absoluteFilePath, { mode: 0o600, flags: 'w' })
     await pipelineAsync(args.stream, writePipe)
 
+    let hash = crypto.createHash('md5')
+    hash.setEncoding('hex')
+    await pipelineAsync(args.stream, hash)
+    const etag = hash.read()
 
-    const contentTypeDirPath = Path.dirname(contentTypeFilePath)
-    await this.mkdirs(contentTypeDirPath)
+    const metaDataDirPath = Path.dirname(metaDataFilePath)
+    await this.mkdirs(metaDataDirPath)
     await fs.writeFile(
-      contentTypeFilePath, 
-      JSON.stringify({ 'content-type': contentType }), { mode: 0o600 })
-
-    // const statArgs: PerformStatArgs = {
-    //   path:
-    //   storageTopLevel:
-    // }
-    // await this.performStat()
+      metaDataFilePath, 
+      JSON.stringify({ 'content-type': contentType, etag }), { mode: 0o600 })
 
     return {
       publicUrl: `${this.readURL}${args.storageTopLevel}/${args.path}`,
-      etag: ''
+      etag
     }
     
   }
 
   async performDelete(args: PerformDeleteArgs): Promise<void> {
-    const { absoluteFilePath, contentTypeFilePath } = this.getFullFilePathInfo(args)
+    const { absoluteFilePath, metaDataFilePath } = this.getFullFilePathInfo(args)
     let stat: fs.Stats
     try {
       stat = await fs.stat(absoluteFilePath)
@@ -276,31 +275,28 @@ class DiskDriver implements DriverModel {
       throw new DoesNotExist('Path is not a file')
     }
     await fs.unlink(absoluteFilePath)
-    await fs.unlink(contentTypeFilePath)
+    await fs.unlink(metaDataFilePath)
   }
 
-  static async parseFileStat(stat: fs.Stats, contentTypeFilePath: string): Promise<StatResult> {
-    const contentTypeJsonStr = await fs.readFile(contentTypeFilePath, 'utf8')
-    const contentType = JSON.parse(contentTypeJsonStr)['content-type']
+  static async parseFileStat(stat: fs.Stats, metaDataFilePath: string): Promise<StatResult> {
+    const metaDataJsonStr = await fs.readFile(metaDataFilePath, 'utf8')
+    const metaDataJson = JSON.parse(metaDataJsonStr)
+    const contentType = metaDataJson['content-type']
+    const etag = metaDataJson['etag']
     const lastModified = dateToUnixTimeSeconds(stat.mtime)
-
-    // create "weak" tag from last-modified time and file size
-    const mtime = stat.mtime.getTime().toString(16)
-    const size = stat.size.toString(16)
-    const statTag = '"' + size + '-' + mtime + '"'
 
     const result: StatResult = {
       exists: true,
-      etag: statTag,
+      etag,
       contentLength: stat.size,
-      contentType: contentType,
+      contentType,
       lastModifiedDate: lastModified
     }
     return result
   }
 
   async performRead(args: PerformReadArgs): Promise<ReadResult> {
-    const { absoluteFilePath, contentTypeFilePath } = this.getFullFilePathInfo(args)
+    const { absoluteFilePath, metaDataFilePath } = this.getFullFilePathInfo(args)
     let stat: fs.Stats
     try {
       stat = await fs.stat(absoluteFilePath)
@@ -318,7 +314,7 @@ class DiskDriver implements DriverModel {
       // (pseudo-directory) of existing blobs.
       throw new DoesNotExist('File does not exist')
     }
-    const fileStat = await DiskDriver.parseFileStat(stat, contentTypeFilePath)
+    const fileStat = await DiskDriver.parseFileStat(stat, metaDataFilePath)
     const dataStream = fs.createReadStream(absoluteFilePath)
     const result: ReadResult = {
       ...fileStat,
@@ -329,7 +325,7 @@ class DiskDriver implements DriverModel {
   }
 
   async performStat(args: PerformStatArgs): Promise<StatResult> {
-    const { absoluteFilePath, contentTypeFilePath } = this.getFullFilePathInfo(args)
+    const { absoluteFilePath, metaDataFilePath } = this.getFullFilePathInfo(args)
     let stat: fs.Stats
     try {
       stat = await fs.stat(absoluteFilePath)
@@ -353,7 +349,7 @@ class DiskDriver implements DriverModel {
       } as StatResult
       return result
     }
-    const result = await DiskDriver.parseFileStat(stat, contentTypeFilePath)
+    const result = await DiskDriver.parseFileStat(stat, metaDataFilePath)
     return result
   }
 
@@ -391,7 +387,7 @@ class DiskDriver implements DriverModel {
     }
 
     await fs.move(pathsOrig.absoluteFilePath, pathsNew.absoluteFilePath, {overwrite: true})
-    await fs.move(pathsOrig.contentTypeFilePath, pathsNew.contentTypeFilePath, {overwrite: true})
+    await fs.move(pathsOrig.metaDataFilePath, pathsNew.metaDataFilePath, {overwrite: true})
   }
 
 }
